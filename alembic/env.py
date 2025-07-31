@@ -8,7 +8,7 @@ from sqlalchemy import pool
 # Подключаем app
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from app.database import engine, Base
+from app.config import engine, Base
 from app import models  # Важно для обнаружения всех моделей при autogenerate
 
 # Alembic Config

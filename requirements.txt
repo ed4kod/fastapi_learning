@@ -3,3 +3,6 @@ uvicorn
 sqlalchemy
 alembic
 pydantic
+python-dotenv
+aiogram
+pydantic-settings

@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from .. import crud, schemas
-from ..database import SessionLocal
+from app import crud, schemas
+from app.config import SessionLocal
 
-router = APIRouter(tags=["Задачи"])
+router = APIRouter(
+    prefix="/tasks",
+    tags=["tasks"]
+)
 
 
 def get_db():
@@ -15,7 +18,7 @@ def get_db():
 
 
 @router.post(
-    "/tasks",
+    "/",
     response_model=schemas.TaskInDB,
     status_code=status.HTTP_201_CREATED,
     summary="Создать задачу"
@@ -25,7 +28,7 @@ def create_task(task: schemas.TaskCreate, db: Session = Depends(get_db)):
 
 
 @router.get(
-    "/tasks",
+    "/",
     response_model=list[schemas.TaskInDB],
     summary="Получить список всех задач"
 )
@@ -34,7 +37,7 @@ def get_all_tasks(db: Session = Depends(get_db)):
 
 
 @router.get(
-    "/tasks/{task_id}",
+    "/{task_id}",
     response_model=schemas.TaskInDB,
     summary="Получить задачу по ID"
 )
@@ -46,7 +49,7 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.patch(
-    "/tasks/{task_id}",
+    "/{task_id}",
     response_model=schemas.TaskInDB,
     summary="Переименовать задачу"
 )
@@ -58,19 +61,19 @@ def update_task(task_id: int, update: schemas.TaskUpdate, db: Session = Depends(
 
 
 @router.delete(
-    "/tasks/{task_id}",
+    "/{task_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Удалить задачу"
 )
 def delete_task(task_id: int, db: Session = Depends(get_db)):
-    success = crud.delete_task(db, task_id)
-    if not success:
+    task = crud.delete_task(db, task_id)
+    if task is None:
         raise HTTPException(status_code=404, detail="Задача не найдена")
     return None
 
 
 @router.put(
-    "/tasks/{task_id}/done",
+    "/{task_id}/done",
     response_model=schemas.TaskInDB,
     summary="Отметить задачу: выполнено",
     status_code=status.HTTP_200_OK
@@ -83,7 +86,7 @@ def complete_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.put(
-    "/tasks/{task_id}/undone",
+    "/{task_id}/undone",
     response_model=schemas.TaskInDB,
     summary="Отметить задачу: не выполнено",
     status_code=status.HTTP_200_OK

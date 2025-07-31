@@ -1,10 +1,6 @@
-import uvicorn
 from fastapi import FastAPI
+from app.telegram_bot.runner import lifespan
 from app.routers import tasks
 
-app = FastAPI()
-
+app = FastAPI(lifespan=lifespan)
 app.include_router(tasks.router)
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", reload=True)
