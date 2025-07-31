@@ -1,0 +1,32 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Кэш и байткод
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# IDE и редакторы
+.idea/
+.vscode/
+*.swp
+
+# Секреты и переменные окружения
+.env
+*.env
+
+# Базы данных SQLite
+*.db
+*.sqlite3
+
+# Кэш и артефакты сборки
+*.egg-info/
+dist/
+build/
+.cache/
+.pytest_cache/
+
+# Логи
