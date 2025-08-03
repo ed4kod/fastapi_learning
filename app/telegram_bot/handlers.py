@@ -3,8 +3,9 @@ from aiogram.filters import Command, BaseFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from html import escape
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.markdown import hbold
 
 from app import crud, schemas
 from app.config import SessionLocal
@@ -33,8 +34,8 @@ class AddTaskStates(StatesGroup):
     waiting_for_task_title = State()
 
 
-class DoneStates(StatesGroup):
-    waiting_for_task_id = State()
+class EditTaskStates(StatesGroup):
+    waiting_for_new_title = State()
 
 
 class DeleteStates(StatesGroup):
@@ -50,14 +51,155 @@ async def start_command(message: types.Message):
 
 
 @router.message(lambda m: m.text == "📋 Список задач")
-async def handle_task_list_button(message: types.Message):
-    await list_tasks_handler(message)
+async def handle_task_list_button(message: types.Message, state: FSMContext):
+    await list_tasks_handler(message, state)
 
 
 @router.message(lambda m: m.text == "➕ Добавить задачу")
 async def handle_add_task_button(message: types.Message, state: FSMContext):
     await message.answer("📝 Введите название новой задачи:")
     await state.set_state(AddTaskStates.waiting_for_task_title)
+
+
+@router.message(AddTaskStates.waiting_for_task_title)
+async def process_task_title(message: types.Message, state: FSMContext):
+    task_title = escape(message.text.strip())
+    if not task_title:
+        await message.answer("❗ Название задачи не может быть пустым. Попробуй ещё раз.")
+        return
+
+    db = SessionLocal()
+    try:
+        new_task = crud.create_task(db, schemas.TaskCreate(title=task_title, user_id=message.from_user.id))
+        await message.answer(f"✅ Задача добавлена: {new_task.id}")
+    finally:
+        db.close()
+
+    await state.clear()
+
+
+async def send_tasks_list(message: types.Message | types.CallbackQuery, state: FSMContext = None):
+    db = SessionLocal()
+    try:
+        user_id = message.from_user.id if isinstance(message, types.Message) else message.message.chat.id
+        username = message.from_user.username if isinstance(message, types.Message) else message.from_user.username
+        tasks = crud.get_tasks(db, user_id=user_id)
+
+        if state:
+            data = await state.get_data()
+            old_msgs: list[int] = data.get("last_messages", [])
+            for msg_id in old_msgs:
+                try:
+                    await message.bot.delete_message(chat_id=user_id, message_id=msg_id)
+                except Exception:
+                    pass
+
+        sent_ids = []
+
+        # Заголовок + кнопка обновления
+        refresh_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Обновить список", callback_data="list_tasks")]
+            ]
+        )
+        header = await message.bot.send_message(chat_id=user_id, text=f"👤 {username}", reply_markup=refresh_keyboard)
+        sent_ids.append(header.message_id)
+
+        if not tasks:
+            msg = await message.bot.send_message(chat_id=user_id, text="📭 Список задач пуст.")
+            sent_ids.append(msg.message_id)
+        else:
+            for task in tasks:
+                status_icon = "✅" if task.done else "❌"
+                text = f"{status_icon} {escape(task.title)}"
+                buttons = InlineKeyboardMarkup(inline_keyboard=[[  # кнопки в одном ряду
+                    InlineKeyboardButton(
+                        text="✅" if not task.done else "❌",
+                        callback_data=f"{'done' if not task.done else 'undone'}_{task.id}"
+                    ),
+                    InlineKeyboardButton(text="✏", callback_data=f"edit_{task.id}"),
+                    InlineKeyboardButton(text="🗑", callback_data=f"delete_{task.id}")
+                ]])
+                msg = await message.bot.send_message(chat_id=user_id, text=text, reply_markup=buttons)
+                sent_ids.append(msg.message_id)
+
+        if state:
+            await state.update_data(last_messages=sent_ids)
+
+    finally:
+        db.close()
+
+
+@router.message(Command("list_tasks"))
+async def list_tasks_handler(message: types.Message, state: FSMContext):
+    await send_tasks_list(message, state)
+
+
+@router.callback_query(lambda c: c.data == "list_tasks")
+async def inline_list_tasks(callback: types.CallbackQuery, state: FSMContext):
+    await send_tasks_list(callback, state)
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("done_"))
+async def inline_done_handler(callback: types.CallbackQuery):
+    task_id = int(callback.data.split("_")[1])
+    db = SessionLocal()
+    try:
+        crud.mark_task_done(db, task_id)
+    finally:
+        db.close()
+    await inline_list_tasks(callback)
+    await callback.answer("Задача отмечена выполненной!")
+
+
+@router.callback_query(lambda c: c.data.startswith("undone_"))
+async def inline_undone_handler(callback: types.CallbackQuery):
+    task_id = int(callback.data.split("_")[1])
+    db = SessionLocal()
+    try:
+        crud.mark_task_undone(db, task_id)
+    finally:
+        db.close()
+    await inline_list_tasks(callback)
+    await callback.answer("Задача отмечена как невыполненная!")
+
+
+@router.callback_query(lambda c: c.data.startswith("delete_"))
+async def inline_delete_handler(callback: types.CallbackQuery):
+    task_id = int(callback.data.split("_")[1])
+    db = SessionLocal()
+    try:
+        crud.delete_task(db, task_id)
+    finally:
+        db.close()
+    await inline_list_tasks(callback)
+    await callback.answer("Задача удалена!")
+
+
+@router.callback_query(lambda c: c.data.startswith("edit_"))
+async def edit_task_handler(callback: types.CallbackQuery, state: FSMContext):
+    task_id = int(callback.data.split("_")[1])
+    await state.set_state(EditTaskStates.waiting_for_new_title)
+    await state.update_data(task_id=task_id)
+    await callback.message.answer("✏ Введите новый текст задачи:")
+    await callback.answer()
+
+
+@router.message(EditTaskStates.waiting_for_new_title)
+async def process_edit_task(message: types.Message, state: FSMContext):
+    new_title = escape(message.text.strip())
+    data = await state.get_data()
+    task_id = data.get("task_id")
+
+    db = SessionLocal()
+    try:
+        crud.update_task(db, task_id, schemas.TaskUpdate(title=new_title))
+    finally:
+        db.close()
+
+    await message.answer("✅ Задача обновлена!")
+    await state.clear()
 
 
 @router.message(Command("add_task"))
@@ -81,171 +223,45 @@ async def add_task_handler(message: types.Message, state: FSMContext):
         await state.set_state(AddTaskStates.waiting_for_task_title)
 
 
-@router.message(AddTaskStates.waiting_for_task_title)
-async def process_task_title(message: types.Message, state: FSMContext):
-    task_title = escape(message.text.strip())
-    if not task_title:
-        await message.answer("❗ Название задачи не может быть пустым. Попробуй ещё раз.")
-        return
-
-    db = SessionLocal()
-    try:
-        new_task = crud.create_task(db, schemas.TaskCreate(title=task_title, user_id=message.from_user.id))
-        await message.answer(f"✅ Задача добавлена: {new_task.id}")
-    finally:
-        db.close()
-
-    await state.clear()
-
-
-@router.message(Command("list_tasks"))
-async def list_tasks_handler(message: types.Message):
-    db = SessionLocal()
-    try:
-        tasks = crud.get_tasks(db, user_id=message.from_user.id)
-        if not tasks:
-            await message.answer("📭 Список задач пуст.")
-        else:
-            for task in tasks:
-                status = "✅" if task.done else "❌"
-                text = f"{task.id}. {task.title} [{status}]"
-
-                if task.done:
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [
-                            InlineKeyboardButton(text="❌ Не выполнена", callback_data=f"undone_{task.id}"),
-                            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{task.id}")
-                        ]
-                    ])
-                else:
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [
-                            InlineKeyboardButton(text="✅ Выполнить", callback_data=f"done_{task.id}"),
-                            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{task.id}")
-                        ]
-                    ])
-
-                await message.answer(text, reply_markup=keyboard)
-    finally:
-        db.close()
-
-
-@router.callback_query(lambda c: c.data.startswith("done_"))
-async def inline_done_handler(callback: types.CallbackQuery):
+@router.callback_query(lambda c: c.data.startswith("toggle_"))
+async def toggle_task_status(callback: types.CallbackQuery):
     task_id = int(callback.data.split("_")[1])
     db = SessionLocal()
     try:
-        task = crud.mark_task_done(db, task_id)
-        if task:
-            status = "✅"
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="❌ Не выполнена", callback_data=f"undone_{task.id}"),
-                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{task.id}")
-            ]])
-            await callback.message.edit_text(f"{task.id}. {task.title} [{status}]", reply_markup=keyboard)
-            await callback.answer("Задача отмечена выполненной!")
+        task = crud.get_task(db, task_id)
+        if task.done:
+            crud.mark_task_undone(db, task_id)
         else:
-            await callback.answer("Задача не найдена.", show_alert=True)
+            crud.mark_task_done(db, task_id)
     finally:
         db.close()
+    await inline_list_tasks(callback)
+    await callback.answer("Статус задачи изменён!")
 
 
-@router.callback_query(lambda c: c.data.startswith("undone_"))
-async def inline_undone_handler(callback: types.CallbackQuery):
-    task_id = int(callback.data.split("_")[1])
+@router.message(EditTaskStates.waiting_for_new_title)
+async def process_edit_task(message: types.Message, state: FSMContext):
+    new_title = escape(message.text.strip())
+    data = await state.get_data()
+    task_id = data.get("task_id")
+
     db = SessionLocal()
     try:
-        task = crud.mark_task_undone(db, task_id)
-        if task:
-            status = "❌"
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="✅ Выполнить", callback_data=f"done_{task.id}"),
-                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{task.id}")
-            ]])
-            await callback.message.edit_text(f"{task.id}. {task.title} [{status}]", reply_markup=keyboard)
-            await callback.answer("Задача отмечена как невыполненной!")
-        else:
-            await callback.answer("Задача не найдена.", show_alert=True)
+        crud.update_task(db, task_id, schemas.TaskUpdate(title=new_title))
     finally:
         db.close()
 
+    # Удалить сообщение пользователя и предыдущее сообщение бота (если знаем msg_id)
+    try:
+        await message.delete()  # Удаляем текст задачи от пользователя
+        await message.reply_to_message.delete()  # Удаляем сообщение "✏️ Введите новый текст задачи:"
+    except Exception:
+        pass  # Без паники, если вдруг одно из сообщений уже удалено
 
-@router.message(DoneStates.waiting_for_task_id)
-async def process_done_task_id(message: types.Message, state: FSMContext):
-    task_id = message.text.strip()
-    if not task_id.isdigit():
-        await message.answer("❗ ID задачи должен быть числом. Попробуйте снова:")
-        return
-
-    await process_done_task(message, int(task_id))
     await state.clear()
 
+    # Обновить список задач
+    await send_tasks_list(message)
 
-async def process_done_task(message: types.Message, task_id: int):
-    db = SessionLocal()
-    try:
-        task = crud.mark_task_done(db, task_id)
-        if task:
-            await message.answer(f"✅ Задача #{task_id} отмечена как выполненная.")
-        else:
-            await message.answer(f"❗ Задача с id {task_id} не найдена.")
-    finally:
-        db.close()
-
-
-@router.message(Command("delete"))
-async def delete_command_handler(message: types.Message, state: FSMContext):
-    parts = message.text.split(maxsplit=1)
-
-    if len(parts) > 1:
-        task_id = parts[1].strip()
-        if task_id.isdigit():
-            await process_delete_task(message, int(task_id))
-            return
-
-    await message.answer("🔢 Введите ID задачи для удаления:")
-    await state.set_state(DeleteStates.waiting_for_task_id)
-
-
-@router.message(DeleteStates.waiting_for_task_id)
-async def process_delete_task_id(message: types.Message, state: FSMContext):
-    task_id = message.text.strip()
-    if not task_id.isdigit():
-        await message.answer("❗ ID задачи должен быть числом. Попробуйте снова:")
-        return
-
-    await process_delete_task(message, int(task_id))
-    await state.clear()
-
-
-async def process_delete_task(message: types.Message, task_id: int):
-    db = SessionLocal()
-    try:
-        task = crud.delete_task(db, task_id)
-        if task:
-            await message.answer(f"🗑 Задача #{task_id} удалена.")
-        else:
-            await message.answer(f"❗ Задача с id {task_id} не найдена.")
-    finally:
-        db.close()
-
-
-@router.callback_query(lambda c: c.data.startswith("delete_"))
-async def inline_delete_handler(callback: types.CallbackQuery):
-    task_id = int(callback.data.split("_")[1])
-    await process_delete_task(callback.message, task_id)
-    await callback.answer("Задача удалена!")
-
-
-@router.callback_query(lambda c: c.data == "create_task")
-async def inline_create_task_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("📝 Введите название новой задачи:")
-    await state.set_state(AddTaskStates.waiting_for_task_title)
-    await callback.answer()
-
-
-@router.callback_query(lambda c: c.data == "list_tasks")
-async def inline_list_tasks(callback: types.CallbackQuery):
-    fake_message = callback.message
-    await list_tasks_handler(fake_message)
-    await callback.answer()
+    # Показать уведомление
+    await message.answer("✅ Задача обновлена!", show_alert=False)
