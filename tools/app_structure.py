@@ -1,4 +1,4 @@
-# запуск из корня:  python tools\structure.py
+# запуск из корня:  python tools\app_structure.py
 
 import os
 import sys

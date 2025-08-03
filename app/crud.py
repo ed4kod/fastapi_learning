@@ -1,18 +1,20 @@
 from sqlalchemy.orm import Session
 from . import models, schemas
 from .models import Task
+from typing import Optional
 
 
 def get_task(db: Session, task_id: int):
     return db.query(models.Task).filter(models.Task.id == task_id).first()
 
 
-def get_tasks(db: Session):
-    return db.query(models.Task).all()
+def get_tasks(db: Session, user_id: int):
+    return db.query(models.Task).filter(models.Task.user_id == user_id).all()
+
 
 
 def create_task(db: Session, task: schemas.TaskCreate):
-    db_task = models.Task(title=task.title)
+    db_task = models.Task(title=task.title, user_id=task.user_id)
     db.add(db_task)
     db.commit()
     db.refresh(db_task)
@@ -63,4 +65,13 @@ def mark_task_undone(db: Session, task_id: int):
     task.done = False
     db.commit()
     db.refresh(task)
+    return task
+
+
+def mark_task_undone(db: Session, task_id: int) -> Optional[Task]:
+    task = db.query(models.Task).filter(models.Task.id == task_id).first()
+    if task:
+        task.done = False
+        db.commit()
+        db.refresh(task)
     return task

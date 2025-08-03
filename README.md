@@ -51,6 +51,9 @@
 
 7. Если хотите увидеть структуру проекта, то запустите из корня:
    ```bash
-   python tools\structure.py
+   # получить структуру проекта
+   python tools\app_structure.py
+   # получить структуру базы данных
+   python tools\db_structure.py
    ```
 

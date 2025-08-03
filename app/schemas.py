@@ -4,6 +4,7 @@ from typing import Optional
 
 class TaskBase(BaseModel):
     title: str
+    user_id: int
 
 
 class TaskCreate(TaskBase):
@@ -12,6 +13,7 @@ class TaskCreate(TaskBase):
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
+    done: Optional[bool] = None
 
 
 class TaskInDB(TaskBase):
