@@ -1,12 +1,11 @@
+from datetime import datetime
 from aiogram import Router, types
 from aiogram.filters import Command, BaseFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from html import escape
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils.markdown import hbold
-
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+import logging
 from app import crud, schemas
 from app.config import SessionLocal
 
@@ -17,8 +16,7 @@ main_menu = ReplyKeyboardMarkup(
         [KeyboardButton(text="📋 Список задач")],
         [KeyboardButton(text="➕ Добавить задачу")]
     ],
-    resize_keyboard=True,
-    input_field_placeholder="Выберите действие..."
+    resize_keyboard=True
 )
 
 
@@ -38,10 +36,6 @@ class EditTaskStates(StatesGroup):
     waiting_for_new_title = State()
 
 
-class DeleteStates(StatesGroup):
-    waiting_for_task_id = State()
-
-
 @router.message(Command("start"))
 async def start_command(message: types.Message):
     await message.answer(
@@ -52,7 +46,7 @@ async def start_command(message: types.Message):
 
 @router.message(lambda m: m.text == "📋 Список задач")
 async def handle_task_list_button(message: types.Message, state: FSMContext):
-    await list_tasks_handler(message, state)
+    await send_tasks_list(message, state)
 
 
 @router.message(lambda m: m.text == "➕ Добавить задачу")
@@ -65,7 +59,7 @@ async def handle_add_task_button(message: types.Message, state: FSMContext):
 async def process_task_title(message: types.Message, state: FSMContext):
     task_title = escape(message.text.strip())
     if not task_title:
-        await message.answer("❗ Название задачи не может быть пустым. Попробуй ещё раз.")
+        await message.answer("❗ Название задачи не может быть пустым.")
         return
 
     db = SessionLocal()
@@ -78,53 +72,79 @@ async def process_task_title(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+def generate_task_text_and_markup(task):
+    status_icon = "✅" if task.done else "❌"
+    text = f"{status_icon} {escape(task.title)}"
+    markup = InlineKeyboardMarkup(inline_keyboard=[[  # одна строка кнопок
+        InlineKeyboardButton(
+            text="✅" if not task.done else "❌",
+            callback_data=f"{'done' if not task.done else 'undone'}_{task.id}"
+        ),
+        InlineKeyboardButton(text="✏", callback_data=f"edit_{task.id}"),
+        InlineKeyboardButton(text="🗑", callback_data=f"delete_{task.id}")
+    ]])
+    return text, markup
+
+
 async def send_tasks_list(message: types.Message | types.CallbackQuery, state: FSMContext = None):
     db = SessionLocal()
     try:
-        user_id = message.from_user.id if isinstance(message, types.Message) else message.message.chat.id
-        username = message.from_user.username if isinstance(message, types.Message) else message.from_user.username
+        if isinstance(message, types.Message):
+            user_id = message.chat.id
+            bot = message.bot
+        else:  # CallbackQuery
+            user_id = message.message.chat.id
+            bot = message.bot
+
         tasks = crud.get_tasks(db, user_id=user_id)
 
+        # Удаляем старые сообщения списка задач, если есть
         if state:
             data = await state.get_data()
-            old_msgs: list[int] = data.get("last_messages", [])
-            for msg_id in old_msgs:
-                try:
-                    await message.bot.delete_message(chat_id=user_id, message_id=msg_id)
-                except Exception:
-                    pass
+            old_msgs = data.get("last_messages", [])
+            old_chat_id = data.get("last_chat_id", None)
+            if old_msgs and old_chat_id == user_id:
+                await delete_old_task_messages(bot, old_chat_id, old_msgs)
 
         sent_ids = []
 
-        # Заголовок + кнопка обновления
-        refresh_keyboard = InlineKeyboardMarkup(
+        today = datetime.now().strftime('%d.%m.%Y')
+        header_text = f"📋 Список задач на {today}"
+        refresh_markup = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Обновить список", callback_data="list_tasks")]
+                [InlineKeyboardButton(text="🔄", callback_data="list_tasks")]
             ]
         )
-        header = await message.bot.send_message(chat_id=user_id, text=f"👤 {username}", reply_markup=refresh_keyboard)
+
+        header = await bot.send_message(chat_id=user_id, text=header_text, reply_markup=refresh_markup)
         sent_ids.append(header.message_id)
 
         if not tasks:
-            msg = await message.bot.send_message(chat_id=user_id, text="📭 Список задач пуст.")
-            sent_ids.append(msg.message_id)
+            empty_msg = await bot.send_message(chat_id=user_id, text="📭 Список задач пуст.")
+            sent_ids.append(empty_msg.message_id)
         else:
             for task in tasks:
                 status_icon = "✅" if task.done else "❌"
-                text = f"{status_icon} {escape(task.title)}"
-                buttons = InlineKeyboardMarkup(inline_keyboard=[[  # кнопки в одном ряду
-                    InlineKeyboardButton(
-                        text="✅" if not task.done else "❌",
-                        callback_data=f"{'done' if not task.done else 'undone'}_{task.id}"
-                    ),
-                    InlineKeyboardButton(text="✏", callback_data=f"edit_{task.id}"),
-                    InlineKeyboardButton(text="🗑", callback_data=f"delete_{task.id}")
-                ]])
-                msg = await message.bot.send_message(chat_id=user_id, text=text, reply_markup=buttons)
-                sent_ids.append(msg.message_id)
+                task_text = f"{status_icon} {escape(task.title)}"
+                if task.done:
+                    username = message.from_user.username if hasattr(message.from_user, "username") else ""
+                    task_text += f"\nкто выполнил: {username}"
+
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[[
+                        InlineKeyboardButton(
+                            text="✅" if not task.done else "❌",
+                            callback_data=f"{'done' if not task.done else 'undone'}_{task.id}"
+                        ),
+                        InlineKeyboardButton(text="✏", callback_data=f"edit_{task.id}"),
+                        InlineKeyboardButton(text="🗑", callback_data=f"delete_{task.id}")
+                    ]]
+                )
+                task_msg = await bot.send_message(chat_id=user_id, text=task_text, reply_markup=keyboard)
+                sent_ids.append(task_msg.message_id)
 
         if state:
-            await state.update_data(last_messages=sent_ids)
+            await state.update_data(last_messages=sent_ids, last_chat_id=user_id)
 
     finally:
         db.close()
@@ -137,51 +157,69 @@ async def list_tasks_handler(message: types.Message, state: FSMContext):
 
 @router.callback_query(lambda c: c.data == "list_tasks")
 async def inline_list_tasks(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    old_msgs = data.get("last_messages", [])
+    old_chat_id = data.get("last_chat_id", None)
+    if old_msgs and old_chat_id == callback.message.chat.id:
+        await delete_old_task_messages(callback.bot, old_chat_id, old_msgs)
+
     await send_tasks_list(callback, state)
     await callback.answer()
 
 
+async def update_task_message(callback: types.CallbackQuery, task_id: int):
+    db = SessionLocal()
+    try:
+        task = crud.get_task(db, task_id)
+        if task:
+            new_text, new_markup = generate_task_text_and_markup(task)
+            await callback.message.edit_text(new_text, reply_markup=new_markup)
+    finally:
+        db.close()
+
+
 @router.callback_query(lambda c: c.data.startswith("done_"))
-async def inline_done_handler(callback: types.CallbackQuery):
+async def inline_done_handler(callback: types.CallbackQuery, state: FSMContext):
     task_id = int(callback.data.split("_")[1])
     db = SessionLocal()
     try:
         crud.mark_task_done(db, task_id)
     finally:
         db.close()
-    await inline_list_tasks(callback)
+    await update_task_message(callback, task_id)
     await callback.answer("Задача отмечена выполненной!")
 
 
 @router.callback_query(lambda c: c.data.startswith("undone_"))
-async def inline_undone_handler(callback: types.CallbackQuery):
+async def inline_undone_handler(callback: types.CallbackQuery, state: FSMContext):
     task_id = int(callback.data.split("_")[1])
     db = SessionLocal()
     try:
         crud.mark_task_undone(db, task_id)
     finally:
         db.close()
-    await inline_list_tasks(callback)
+    await update_task_message(callback, task_id)
     await callback.answer("Задача отмечена как невыполненная!")
 
 
 @router.callback_query(lambda c: c.data.startswith("delete_"))
-async def inline_delete_handler(callback: types.CallbackQuery):
+async def inline_delete_handler(callback: types.CallbackQuery, state: FSMContext):
     task_id = int(callback.data.split("_")[1])
     db = SessionLocal()
     try:
         crud.delete_task(db, task_id)
     finally:
         db.close()
-    await inline_list_tasks(callback)
+    await callback.message.delete()
     await callback.answer("Задача удалена!")
+    await send_tasks_list(callback, state)
 
 
 @router.callback_query(lambda c: c.data.startswith("edit_"))
 async def edit_task_handler(callback: types.CallbackQuery, state: FSMContext):
     task_id = int(callback.data.split("_")[1])
     await state.set_state(EditTaskStates.waiting_for_new_title)
-    await state.update_data(task_id=task_id)
+    await state.update_data(task_id=task_id, message_id=callback.message.message_id)
     await callback.message.answer("✏ Введите новый текст задачи:")
     await callback.answer()
 
@@ -198,14 +236,25 @@ async def process_edit_task(message: types.Message, state: FSMContext):
     finally:
         db.close()
 
-    await message.answer("✅ Задача обновлена!")
     await state.clear()
+    await message.answer("✅ Задача обновлена!")
+
+    chat_id = message.chat.id
+    message_id = data.get("message_id")
+    if message_id:
+        db = SessionLocal()
+        try:
+            task = crud.get_task(db, task_id)
+            new_text, new_markup = generate_task_text_and_markup(task)
+            await message.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=new_text,
+                                                reply_markup=new_markup)
+        finally:
+            db.close()
 
 
 @router.message(Command("add_task"))
 async def add_task_handler(message: types.Message, state: FSMContext):
     parts = message.text.split(maxsplit=1)
-
     if len(parts) > 1:
         task_title = escape(parts[1].strip())
         if not task_title:
@@ -223,45 +272,9 @@ async def add_task_handler(message: types.Message, state: FSMContext):
         await state.set_state(AddTaskStates.waiting_for_task_title)
 
 
-@router.callback_query(lambda c: c.data.startswith("toggle_"))
-async def toggle_task_status(callback: types.CallbackQuery):
-    task_id = int(callback.data.split("_")[1])
-    db = SessionLocal()
-    try:
-        task = crud.get_task(db, task_id)
-        if task.done:
-            crud.mark_task_undone(db, task_id)
-        else:
-            crud.mark_task_done(db, task_id)
-    finally:
-        db.close()
-    await inline_list_tasks(callback)
-    await callback.answer("Статус задачи изменён!")
-
-
-@router.message(EditTaskStates.waiting_for_new_title)
-async def process_edit_task(message: types.Message, state: FSMContext):
-    new_title = escape(message.text.strip())
-    data = await state.get_data()
-    task_id = data.get("task_id")
-
-    db = SessionLocal()
-    try:
-        crud.update_task(db, task_id, schemas.TaskUpdate(title=new_title))
-    finally:
-        db.close()
-
-    # Удалить сообщение пользователя и предыдущее сообщение бота (если знаем msg_id)
-    try:
-        await message.delete()  # Удаляем текст задачи от пользователя
-        await message.reply_to_message.delete()  # Удаляем сообщение "✏️ Введите новый текст задачи:"
-    except Exception:
-        pass  # Без паники, если вдруг одно из сообщений уже удалено
-
-    await state.clear()
-
-    # Обновить список задач
-    await send_tasks_list(message)
-
-    # Показать уведомление
-    await message.answer("✅ Задача обновлена!", show_alert=False)
+async def delete_old_task_messages(bot, chat_id: int, message_ids: list[int]):
+    for msg_id in message_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+        except Exception as e:
+            logging.warning(f"Не удалось удалить сообщение {msg_id} в чате {chat_id}: {e}")
