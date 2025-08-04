@@ -6,9 +6,11 @@ from .config import Base
 class Task(Base):
     __tablename__ = "tasks"
 
+
     id = Column(Integer, primary_key=True, index=True)
-    title = Column(String, index=True)
+    title = Column(String, nullable=False)
     done = Column(Boolean, default=False)
+    done_by = Column(String, nullable=True)
 
     user_id = Column(Integer, index=True)  # Telegram user ID
     created_at = Column(DateTime(timezone=True), server_default=func.now())

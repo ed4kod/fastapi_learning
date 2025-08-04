@@ -4,11 +4,12 @@ from typing import Optional
 
 class TaskBase(BaseModel):
     title: str
-    user_id: int
+    done: bool = False
+    done_by: Optional[str] = None
 
 
 class TaskCreate(TaskBase):
-    pass
+    user_id: int
 
 
 class TaskUpdate(BaseModel):
@@ -18,7 +19,6 @@ class TaskUpdate(BaseModel):
 
 class TaskInDB(TaskBase):
     id: int
-    done: bool
 
     class Config:
         from_attributes = True
